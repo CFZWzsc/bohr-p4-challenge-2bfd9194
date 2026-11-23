@@ -1,124 +1,268 @@
 ---
-name: research-archive-steward
-description: Use when a research-library case supplies scattered documents, uploads, or backups and asks for inventory, directory organization, content-hash deduplication, version-chain reconstruction, or a handover manifest; run scripts/run_skill.py to produce a deterministic contract-preserving result.json.
+name: research-library-ingest-steward
+description: Use when a research-library case supplies case.json plus scattered materials and needs deterministic inventory, sha256 hashes, metadata inference, duplicate and version detection, conflict-safe target planning, dry-run then apply into /app/output/library, and /app/output/result.json plus run-review.md. Triggers include 科研资料入库, 文件整理, 入库清单, 重复文件, 版本链, manifest, dry-run.
 ---
 
-# 科研资料落库与版本关系管家
+# 科研资料入库 / Research Library Ingest Steward
 
-## 用途与适用条件
+## 1. 用途
 
-在科研资料库整理、批量上传、目录归位、重复文件识别、版本链重建和交接清单生成任务中使用，典型输入是 `/input/case.json`、`/input/task.md` 与一批真实文件。
+把一个没有整理过的科研资料目录，变成**可复核、可回滚、可重复运行**的资料库入库结果：
 
-本 Skill 只做四件可核验的事：
+- 逐文件计算 `sha256`，给出清单（inventory）与字节数；
+- 从 `case.json`、sidecar、文件名和文本首段推断元数据，缺失就留空；
+- 检测**完全重复**（同 hash）与**版本链**（同标题干 + 修订标记）；
+- 生成 `source -> target` 的入库清单、冲突处理方案与 dry-run 计划；
+- 在明确允许时执行 `--apply`，把文件**复制**到 `/app/output/library`，复制后复核 hash；
+- 输出 `/app/output/result.json`（契约字段齐全）与 `/app/output/run-review.md`（人工复核）。
 
-1. 以内容哈希（SHA-256）盘点文件，不按文件名猜身份；
-2. 按扩展名类别与版本状态给出目标目录模板和逐文件操作计划；
-3. 用「内容哈希 + 文件名主干 + 修改时间」重建重复组与版本链；
-4. 输出可复跑的清单、证据与跳过记录。
+## 2. 适用条件
 
-不适用：需要读取 PDF 正文语义、做文献精读或写作润色的任务；需要真正移动/删除用户原始文件且无备份的任务。脚本**只读输入**，不移动、不改名、不删除任何源文件，只输出计划与清单。
+适用于同时满足以下条件的情况：
 
-## 输入
+- 输入是一个目录，通常包含 `case.json` 与 `materials/`（或 `case.json` 中用 `materials`、`data_dir`、`input_dir` 等键指定资料根目录）；
+- 需要按项目/类别/文件名建立目录结构，或至少需要一份带 hash 的入库清单；
+- 需要区分“重复文件”和“同一文献的多个版本”；
+- 需要 dry-run 先行、apply 可验证、失败可回滚；
+- 允许只读输入，输出写在 `/app/output` 与 `/app/work`。
 
-- `/input/case.json`（必需）：含 `case_id` 与 `output_contract`；材料路径可能出现在 `input_dir`、`materials`、`files`、`path` 等字段。
-- `/input/task.md`（可选）：补充目录约定、命名规则、字段要求。
-- 材料目录中的真实文件（任意类型）。未提供路径时回退扫描 case 文件所在目录。
-- 运行时路径：工作区 `/app/work`，最终结果 `/app/output/result.json`。
+## 3. 不适用场景
 
-## 处理流程（对应评分维度）
+- 需要联网检索、补全真实作者/期刊/DOI：本 Skill 不联网，缺失元数据不会编造；
+- 需要 OCR、PDF 正文抽取、图像识别：本 Skill 只做字节级 hash 与文本首段探测；
+- 需要真正删除、去重删除、覆盖原文件：本 Skill 明确禁止；
+- 需要数据库、对象存储、MongoDB 等外部系统写入；
+- 需要处理有版权的资料再分发：本 Skill 只做本地整理，不改变授权。
 
-1. **盘点（任务完成度）**：递归枚举材料根目录，跳过 `__pycache__`、`.git`、`node_modules`、虚拟环境目录；记录相对路径、字节数、扩展名、修改时间、可读性和 SHA-256。符号链接不跟随，避免越界。
-2. **去重（结果正确性）**：仅在 SHA-256 完全相同时判为重复；零字节文件单独标注，不与正常文件混为一谈。重复组保留全部成员路径，不擅自删除。
-3. **版本链（结果正确性）**：对文件名主干去除 `v1`、`rev2`、`final`、`copy`、`(1)`、`修订`、`副本` 等版本噪声后分组，同组按修改时间升序排列，标出 `supersedes` 关系与当前版本。明确记录这是文件名与时间推断，未做正文差异比对。
-4. **目录模板（结果完整性）**：按 `documents/data/images/archives/code/other` 归类，给出 `target_path`；同一版本链中的旧版本指向 `archive/<category>/...`，当前版本指向 `<category>/...`。
-5. **操作证据（可核验性）**：输出 `evidence`，含输入根、哈希算法、文件数、总字节、被截断哈希的文件（仅超过 64 MiB 时）、不可读文件与失败原因；他人可按清单复算。
-6. **失败与恢复（可靠体验）**：无文件、目录不存在、文件不可读、哈希被截断、重名冲突分别进入 `errors`、`uncertainty`、`skipped`，不把未完成写成完成。
+## 4. 输入形态
 
-## 输出契约
+典型输入：
 
-`/app/output/result.json` 顶层必须保留：
+```text
+/input/
+  case.json
+  task.md                  # 可选，人类任务说明
+  materials/
+    papers/...
+    data/...
+    *.csv.meta.json        # 可选 sidecar
+    metadata.json          # 可选全局元数据
+    metadata.csv           # 可选全局元数据表
+```
 
-| 字段 | 含义 |
-|-|-|
-| `case_id` | 与输入完全一致 |
-| 输入 `output_contract` 的每个字段 | 按别名词表映射到真实计算结果；无法映射的字段写 `null`，并在 `contract_notes` 说明 |
-| `status` | `success` / `partial` / `insufficient_input` / `failed` |
-| `result` | 完整清单、重复组、版本链、目录计划、操作计划 |
-| `evidence` | 哈希、输入根、文件数、截断与不可读记录 |
-| `uncertainty` | 推断边界与未验证项 |
-| `errors` | 实际错误文本（不含令牌） |
-| `stats` | 计数与字节汇总 |
+`case.json` 常用字段：
 
-契约字段别名词表覆盖 `manifest`、`inventory`、`file_list`、`duplicates`、`version_chains`、`layout`、`directory_tree`、`operations`、`changes`、`skipped`、`summary` 等常见命名；未匹配字段一律 `null` 并记录，不臆造内容。
+- `case_id`、`title`、`project`、`instrument`、`metadata`；
+- `materials` / `input_dir` / `data_dir` / `files` 等资料根路径；
+- `required_metadata`（默认 `title`、`authors`、`year`）；
+- `declared_files`（声明但可能缺失的文件）；
+- `policy`（`target_template`、`archive_template`、`allow_move` 等）；
+- `output_contract`（运行时期望的输出字段，dict/list/string 均可）。
 
-## 异常处理表
+支持 sidecar：`<文件名>.meta.json`、`<stem>.meta.json`、根目录 `metadata.json`、`metadata.csv`。
+`case.json` 缺失或损坏时仍会扫描资料并写出 `result.json`，状态为 `failed`。
 
-| 情况 | 处置 | 状态 |
-|-|-|-|
-| case.json 不存在或非法 JSON | `errors` 记录原因，输出空清单 | `failed` |
-| 无 `case_id` | 使用 `unknown`，`uncertainty` 说明 | `partial` |
-| 材料路径不存在 | 记录缺失根，继续尝试其他根 | `insufficient_input`（全部缺失时） |
-| 目录为空 | 空清单 + 明确说明 | `insufficient_input` |
-| 文件不可读/权限不足 | 加入 `skipped`，不中断其他文件 | `partial` |
-| 文件大于 64 MiB | 仅对前 64 MiB 计算哈希并标记 `hash_truncated` | `partial` |
-| 同哈希但文件名不同 | 归入同一重复组，全部保留 | `success` |
-| 同主干但内容不同 | 归入版本链，不判为重复 | `success` |
+## 5. 调用方式（必须使用精确命令）
 
-## 限制
-
-- 只做清单与计划，不执行真实移动/改名/删除；如需落库，由调用方按 `operations` 逐条执行并留存日志。
-- 版本链依据文件名主干与修改时间，不是正文 diff；跨语言命名、无语义文件名会漏分组。
-- 不解析 PDF/Office 正文，不判断科学内容。
-- 单次最多枚举 5000 个文件，超过部分进入 `skipped` 并标注截断。
-
-## 最小调用示例（示例，非官方案例结果）
+在评测容器内，Skill 安装在 `/skills/weekly-skill`：
 
 ```bash
 python /skills/weekly-skill/scripts/run_skill.py \
-  --case /input/case.json \
-  --out /app/output/result.json \
-  --work /app/work
+  --input /input \
+  --work /app/work \
+  --out /app/output
 ```
 
-示意输入与示意输出（合成，仅说明接口）：
+以上是 **dry-run**（默认，不复制、不修改输入）。自检通过后执行：
 
-```json
-{"case_id": "synthetic-demo", "output_contract": {"manifest": "array", "duplicates": "array", "status": "string"}}
+```bash
+python /skills/weekly-skill/scripts/run_skill.py \
+  --input /input \
+  --work /app/work \
+  --out /app/output \
+  --apply
 ```
 
-```json
-{"case_id": "synthetic-demo", "manifest": null, "duplicates": null, "status": "insufficient_input", "contract_notes": ["manifest: ..."]}
+参数：
+
+| 参数 | 默认值 | 说明 |
+|-|-|-|
+| `--input` | `/input` | 输入目录 |
+| `--work` | `/app/work` | 计划、日志等中间产物 |
+| `--out` | `/app/output` | `result.json`、`run-review.md`、`library/` |
+| `--apply` | 关闭 | 不传即 dry-run |
+| `--policy` | 内置 `assets/policy.json` | 可选策略覆盖 |
+
+在仓库内可直接用示例验证：
+
+```bash
+python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /tmp/out
+python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /tmp/out --apply
 ```
 
-真实运行时以实际材料为准，上例不冒充任何正式案例结果。
+## 6. 输出字段
 
+`/app/output/result.json` 固定包含：
 
-## 交付保证与评分对齐
+| 字段 | 说明 |
+|-|-|
+| `case_id` | 案例编号；缺失时为 `unknown` |
+| `status` | `success` / `partial` / `failed` / `insufficient_input` |
+| `mode` | `dry_run` 或 `apply` |
+| `inventory` | 每个文件的路径、字节、sha256、mtime、类别、是否可读 |
+| `manifest` | `source -> target`，含 sha256、action、status、版本链 |
+| `duplicates` | 同 sha256 的重复组，`keep_all_no_delete` |
+| `versions` | 版本链及成员、当前版本、被替代关系 |
+| `renamed` | 因 NFC/空格/非法字符/保留名而改名的记录 |
+| `skipped` | 不可读、空目录、声明缺失、无效 sidecar 等，附原因 |
+| `conflicts` | 同名目标、已有不同内容、同 stem 歧义及解决方式 |
+| `unresolved_metadata` | 缺失的必填元数据字段，不猜测 |
+| `plan_actions` | 逐条复制/归档/保留动作，`overwrite=false` |
+| `applied` | 是否执行了 `--apply` |
+| `rollback_plan` | 已创建文件/目录与撤销操作；输入永远只读 |
+| `logs` / `run_log` | 事件序列与阶段计数（不含 wall-clock，保证可复现） |
+| `uncertainty` | 版本推断、截断 hash、跳过等限制说明 |
+| `stats` / `metadata` / `layout` / `hashes` / `selfcheck` | 统计、元数据索引、目标目录树、hash 表、自检结果 |
+| `contract_fields` / `contract_extras` / `contract_unmapped` | 契约字段与映射说明 |
 
-调用顺序（固定）：
+契约字段自动映射（大小写与下划线不敏感）：
 
-1. 先运行包内脚本（若存在）：`python scripts/run_skill.py`（默认读 `/input/case.json`，写 `/app/output/result.json`）；路径不同时用 `--case` / `--output` 指定。
-2. 再完成脚本无法自动完成的实质工作（译文、论述、图表、修订、结论等），把结果写回 `result.json` 对应字段。
-3. 最后自检：`case_id` 与输入一致；`output_contract` 每个字段都存在；`status` 按契约取 `success`/`partial`/`insufficient_input`/`failed`（缺输入或证据不足时用 `insufficient_input`/`partial`）；无 `pending` 占位；数字、引用、来源可逐条回溯。
+- `files` / `items` / `records` / `state` -> `inventory`
+- `moves` / `renames` / `operations` / `manifest` -> `manifest`
+- `dupes` / `duplicates` -> `duplicates`
+- `versions` / `revision_chain` -> `versions`
+- `conflicts` -> `conflicts`；`skips` / `skipped` -> `skipped`
+- `report` / `summary` -> 一段短字符串
+- `evidence` -> `manifest`；`sources` -> `logs`
+- 未知字段先做同义/子串启发式，仍无法映射则保留 `null` 并记入 `contract_extras`
 
-运行保证：
+## 7. 入库规则
 
-- 输入缺失、JSON 损坏、字段异常、输出目录不存在时，仍须写出结构化 `result.json` 并正常结束，不得崩溃或非零退出。
-- 不联网、不伪造数据、不声称平台评分或官方案例结果。
-- 交付物必须是可直接编辑与复核的成品，而不是流程说明。
+### 7.1 hash、size、mtime
 
-评分对齐（本题五个维度）：
+- 算法固定 `sha256`，流式读取，块大小 1 MiB；
+- 单文件最多 hash 64 MiB（`assets/policy.json` 可调），超出部分不读，记录 `hash_truncated=true` 并写入 `uncertainty`；
+- `bytes` 取 `stat` 实际大小；`mtime` 只用于版本排序与证据，**不用于判断文件相同**；
+- 文件相同必须 `sha256` 相同；空文件单独统计，不进入重复组；
+- 不可读文件仍进入 `inventory`，`sha256=null`、`readable=false`，并写 `skipped`。
 
-- 实际效果（40）：完整产出任务要求的最终成品，覆盖全部输入条目，可直接进入修改流程。
-- 使用增益（25）：体现相对基础 Agent 的可验证改进（结构化、术语/数字/引用核对、可编辑性）。
-- 创新增益（15）：保留方法学增量（分块、对齐、二次校验、版本比对等），并用结果证明其价值。
-- 可靠体验（10）：异常输入有明确降级与说明，不同长度/文体/重复运行下稳定产出。
-- 生态贡献（10）：用途、调用、输入输出、限制、示例、维护信息齐全，资源可被他人复用。
+### 7.2 重复 vs 版本
 
-## 最终交付强制要求
+- **重复**：`sha256` 相同且大小 > 0。报告全部成员，`action=keep_all_no_delete`，绝不删除；
+- **版本链**：同一规范化标题干（去掉修订标记后）且扩展名相同，且至少一个成员带显式修订标记（或全部成员在同一目录、仅大小写/NFC 差异）；
+  - 标记示例：`v1`、`v2`、`rev2`、`r3`、`version2`、`draft`、`final`、`new`、`old`、`backup`、`(1)`、`copy1`、`修订`、`副本`、`备份`、`定稿`、`最终`、`版本2`；
+  - 同 hash 的“副本”只算重复，不算版本；
+  - 不同目录、没有修订标记、内容又不同：记 `stem_ambiguity` 冲突，不强行合并；
+  - 成员按 `mtime_ns -> 标记秩 -> 路径` 排序，最后一个为当前版本；
+  - 旧版本进 `_archive/`，当前版本进正常目录；不做正文 diff，只报告 hash/大小/时间证据。
 
-1. **调用 Agent 必须交付成品，不是流程说明**：脚本产出只是索引、核对或规格骨架；调用 Agent 必须在同一 `result.json` 中补齐本题要求的最终产物（正文/译文/审稿意见/综述/分析结论/图表源文件与导出件/幻灯片页内容与讲稿/实验方案等）。交付字段为空、只有标题骨架，或含 `pending`、`TODO` 之类占位，一律视为未完成。
-2. **必须覆盖全部输入条目**：输入中的每个章节、问题、文献、图、页面、指标都要有对应条目，不得只处理示例或首条；确实缺失的条目写入 `uncertainty` / `limitations` 并说明原因，不得静默跳过。
-3. **必须自检后再交付**：`case_id` 与输入一致；`output_contract` 每个字段都存在；状态值取本题契约规定的枚举；数字、单位、引用、来源可逐条回溯；结果内部无自相矛盾。
-4. **参数等价**：`python scripts/run_skill.py --case <输入> --out <输出>` 与 `--output <输出>` 等价；默认 `/input/case.json` → `/app/output/result.json`。
-5. **平台用 3 个固定案例分别运行**：逻辑要由输入驱动，不针对某一份示例硬编码；字段命名差异走别名匹配与显式降级，并在 `uncertainty` 记录假设。
+### 7.3 命名策略
+
+- Unicode 统一 `NFC`；
+- 非法字符 `<>:"/\|?*#%` 与控制字符替换为 `_`；
+- 连续空白折叠为 `_`；
+- Windows 保留名（`CON`、`NUL`、`COM1` 等）前加 `_`；
+- 扩展名小写；主干最长 120 字符；目标绝对路径超过 240 字符时截断并追加 sha256 前缀；
+- 默认目标模板：`{project}/{category}/{filename}`；
+- 旧版本：`{project}/_archive/{category}/{filename}`；
+- sidecar：`{project}/_metadata/{filename}`；
+- 类别按扩展名映射到 `documents` / `data` / `images` / `archives` / `code` / `other`；
+- `project` 缺失时使用 `_unassigned`；所有改名都写入 `renamed`。
+
+### 7.4 冲突解决
+
+- 两个源文件映射到同一目标：按路径排序，先到者保留原名，后者追加 `__<sha8>`；仍冲突则 `__<sha8>_2`；
+- 目标已存在且 hash 相同：`keep_existing` / `already_present`，不复制；
+- 目标已存在但 hash 不同：追加 `__<sha8>`，记 `existing_target_differs`，绝不覆盖；
+- 目标位置是目录：追加 `__<sha8>`，记 `existing_target_not_file`；
+- 所有冲突都写 `conflicts`，包含 `resolution` 与 `silent_overwrite=false`。
+
+### 7.5 move vs copy
+
+- 默认 `mode=copy`，**只复制**，输入保留；
+- `safety.allow_move` 即使被 case 打开，本实现也不删除源文件，仍以复制落库，并在 `uncertainty` 说明；
+- 复制使用 `O_CREAT|O_EXCL` 独占创建，复制后复核目标 `sha256`；失败则删除本次新建的目标文件并记 `failed`，不影响源文件。
+
+## 8. 安全约束
+
+1. **永不删除输入**：只读扫描；`--apply` 只创建 `/app/output/library` 下的新文件。
+2. **永不静默覆盖**：目标存在一律走 `keep_existing` 或加后缀；`overwrite` 固定 `false`。
+3. **dry-run 先行**：默认不写库，只写计划与结果；确认后才加 `--apply`。
+4. **不跟随符号链接**：遇到 symlink 记 `skipped`，不读取链接目标。
+5. **有上限**：默认最多 5000 个文件、深度 32、单文件 hash 64 MiB，超出均记录，不崩溃。
+6. **不联网**：不使用 requests、curl、外部 API；仅标准库。
+7. **确定性**：不使用当前时间、随机数、集合迭代顺序；输出按路径排序，重复运行结果一致。
+8. **输出可回滚**：`rollback_plan` 列出本次创建的文件与目录，输入侧无需恢复。
+
+## 9. 回滚与日志
+
+- `logs`：编号事件（`scan_start`、`plan`、`apply`、`selfcheck` 等），只有计数与路径，无 wall-clock；
+- `run_log`：阶段级 `ok/count`，便于判断在哪一步失败；
+- `work/plan/*.json`：`inventory`、`manifest`、`plan_actions`、`duplicates`、`versions`、`logs`、`rollback_plan`；
+- `apply` 时额外写 `out/apply_manifest.json` 与 `out/rollback.json`；
+- 回滚方式：按 `rollback_plan.undo_operations` 删除**本次创建**的文件，再按需删除空目录；输入文件从未改动。
+
+## 10. 异常处理
+
+| 场景 | 行为 |
+|-|-|
+| 无权限 / 文件被占用 | 记 `skipped(unreadable)`，`readable=false`，`status=partial`，仍写 `result.json`，进程退出 0 |
+| 超大文件 | 只 hash 前 64 MiB，`hash_truncated=true`，在 `uncertainty` 说明 |
+| 深层目录 | 超过 `max_depth` 记 `depth_cap`，不静默忽略 |
+| 空目录 | 记 `skipped(empty_directory)` |
+| 中文/空格/特殊字符 | NFC + 替换 + 折叠空白，写 `renamed`，不改源文件 |
+| 损坏 sidecar / 非法 JSON | 记 `skipped(invalid_sidecar_json / orphan_sidecar)`，继续处理其他文件 |
+| 损坏的二进制/正文 | 仍按字节计算 sha256 并入库；不解析正文，无法识别格式级损坏，写入 `uncertainty` |
+| 声明的文件缺失 | 记 `skipped(declared_but_missing)` |
+| `case.json` 损坏 | `status=failed`，`errors` 说明，仍扫描资料并写 `result.json` |
+| 目标同名/已存在 | 加 sha256 后缀，记 `conflicts`，不覆盖 |
+| 输出目录不可写 | 尝试写到 `/app/work/result.json`，仍返回 0 |
+| 参数错误 | 写最小失败结果，仍返回 0 |
+
+## 11. 自检清单
+
+运行后必须逐项确认：
+
+- [ ] `result.json` 存在，`case_id` 与 `status` 非空；
+- [ ] `inventory` 中每个可读文件都有 64 位 `sha256`；
+- [ ] `manifest` 条数与 `inventory` 条数一致，`source` 均存在于 `inventory`；
+- [ ] `manifest` 的 `target` 非空且互不重复（大小写不敏感）；
+- [ ] 契约字段全部存在（`contract_fields` 中无缺失）；
+- [ ] `duplicates`、`versions` 与人工抽查一致；
+- [ ] `skipped`、`conflicts`、`unresolved_metadata` 均有原因；
+- [ ] `selfcheck` 无 `FAIL`；
+- [ ] 运行前后输入文件的 size/mtime/sha256 未变化；
+- [ ] `--apply` 时 `out/library` 中每个文件的 hash 与 `manifest` 一致；
+- [ ] `run-review.md` 已按第 12 节写完。
+
+## 12. 执行 Agent 必做步骤
+
+1. **先 dry-run**（第 5 节第一条命令）。
+2. 读取 `/app/output/result.json`：
+   - `status`、`stats`、`selfcheck`、`skipped`、`conflicts`、`unresolved_metadata`、`plan_actions`；
+   - 若 `selfcheck` 有 `FAIL`，停止 apply，在复核报告中说明失败项。
+3. **独立核对 manifest 与文件系统**：
+   - 遍历 `/input` 的资料根目录，统计普通文件数（排除 `case.json`、`task.md`）；
+   - 与 `len(inventory) + 未进入 inventory 的 skipped 文件数` 比较；
+   - 抽查至少 3 个文件（含中文名）用 `sha256sum` 或 Python `hashlib` 复算，与 `manifest` 对比。
+4. 若 dry-run 自检通过（允许 `partial` 来自已解释的 skipped/unresolved；冲突均为命名冲突），执行第 5 节 `--apply` 命令。
+5. apply 后再次核对：
+   - `/app/output/library` 的文件数等于 `manifest` 中 `target` 非空条数；
+   - 库内文件 hash 与 `manifest` 一致；
+   - `/input` 下文件 hash 未变化。
+6. **写入 `/app/output/run-review.md`**（脚本已生成模板，必须核对并补全，不能只留“待填写”）：
+   - 运行命令、模式、`status`；
+   - 文件数、重复组、版本链、冲突、跳过、未解析元数据数量；
+   - 自检结果逐项 PASS/FAIL；
+   - manifest 与文件系统的独立比对结果；
+   - 已知限制与不确定项；
+   - 回滚方式（删除哪些新文件/目录，输入未改）。
+7. 最终答复必须诚实：`status=partial` 时明确列出 partial 原因，不得声称全部成功；`status=failed` 时说明未能完成的部分与已产出的证据。
+
+## 13. 参考
+
+- `references/ingest-protocol.md`：扫描顺序、hash、元数据来源、确定性；
+- `references/version-and-conflict-rules.md`：版本标记、重复、命名冲突；
+- `references/safety-and-rollback.md`：只读、独占复制、回滚；
+- `assets/policy.json`：命名、hash、上限、allow-move 等策略；
+- `examples/demo-case/` 与 `examples/quickstart.md`：可直接运行的合成样例。
