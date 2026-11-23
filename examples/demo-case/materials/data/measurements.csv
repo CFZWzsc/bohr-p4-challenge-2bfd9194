@@ -1,0 +1,5 @@
+sample_id,condition,value
+S01,baseline,0.41
+S02,baseline,0.44
+S03,treatment,0.58
+S04,treatment,0.61
