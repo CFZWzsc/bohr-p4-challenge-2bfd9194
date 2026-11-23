@@ -1,0 +1,32 @@
+{
+  "case_id": "demo-research-library",
+  "title": "Synthetic research library ingest demo",
+  "project": "NeuroAttention",
+  "instrument": "TEM-2100",
+  "metadata": {
+    "project": "NeuroAttention",
+    "instrument": "TEM-2100"
+  },
+  "required_metadata": ["title", "authors", "year"],
+  "materials": ["materials"],
+  "declared_files": [
+    "materials/raw/upload_interrupted.pdf"
+  ],
+  "policy": {
+    "mode": "copy",
+    "target_template": "{project}/{category}/{filename}",
+    "archive_template": "{project}/_archive/{category}/{filename}"
+  },
+  "output_contract": {
+    "files": "array of every inventoried file, each with sha256",
+    "manifest": "array of source to target records with sha256",
+    "duplicates": "array of duplicate groups",
+    "versions": "array of version chains",
+    "conflicts": "array of name or target conflicts",
+    "skips": "array of skipped or unreadable entries",
+    "report": "short human-readable summary",
+    "evidence": "hashes and provenance for the run",
+    "state": "final library state",
+    "status": "one of success, partial, failed, insufficient_input"
+  }
+}
