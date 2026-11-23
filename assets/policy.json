@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "description": "Policy for sk_entry.py: content-hash ingest, naming, caps and safety.",
+  "hash": {
+    "algorithm": "sha256",
+    "chunk_bytes": 1048576,
+    "max_hash_bytes": 67108864
+  },
+  "caps": {
+    "max_files": 5000,
+    "max_depth": 32,
+    "max_name_chars": 120,
+    "max_path_chars": 240
+  },
+  "naming": {
+    "unicode_form": "NFC",
+    "forbidden_chars": "<>:\"/\\|?*#%",
+    "replacement": "_",
+    "whitespace": "_",
+    "collapse_repeats": true,
+    "lowercase_extension": true,
+    "max_stem_chars": 120,
+    "reserved_names": [
+      "CON", "PRN", "AUX", "NUL",
+      "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+      "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    ],
+    "template": "{project}/{category}/{filename}",
+    "archive_template": "{project}/_archive/{category}/{filename}",
+    "sidecar_template": "{project}/_metadata/{filename}",
+    "fallbacks": {
+      "project": "_unassigned",
+      "year": "nd",
+      "category": "other"
+    }
+  },
+  "categories": {
+    "documents": [".pdf", ".doc", ".docx", ".md", ".txt", ".tex", ".rtf", ".odt", ".pptx", ".ppt", ".epub", ".bib"],
+    "data": [".csv", ".tsv", ".xlsx", ".xls", ".json", ".jsonl", ".sqlite", ".db", ".h5", ".hdf5", ".parquet", ".xml", ".yaml", ".yml", ".dat", ".bin"],
+    "images": [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".svg", ".gif", ".webp"],
+    "archives": [".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".bz2"],
+    "code": [".py", ".r", ".m", ".sh", ".ipynb", ".jl", ".cpp", ".c", ".h", ".java"],
+    "other": []
+  },
+  "exclude_dirs": [".git", "__pycache__", "node_modules", ".venv", "venv", ".cache", ".idea", ".vscode", "$RECYCLE.BIN"],
+  "sidecar": {
+    "suffixes": [".meta.json", ".metadata.json"],
+    "global_files": ["metadata.json", "metadata.csv"]
+  },
+  "safety": {
+    "allow_move": false,
+    "allow_delete": false,
+    "overwrite": "never"
+  },
+  "apply": {
+    "library_subdir": "library",
+    "copy_preserve_times": true,
+    "verify_sha256_after_copy": true
+  },
+  "required_metadata": ["title", "authors", "year"],
+  "write_review": true
+}
