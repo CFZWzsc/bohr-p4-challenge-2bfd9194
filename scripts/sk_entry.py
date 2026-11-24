@@ -1085,7 +1085,7 @@ def plan_targets(inventory, metadata_by_path, chains, policy, case_id, lib_root,
             "hash_truncated": entry["hash_truncated"],
             "category": category,
             "target": target,
-            "target_abs": str(lib_root / Path(target)) if target else None,
+            "target_path": ("library/" + target) if target else None,
             "action": action,
             "status": status,
             "overwrite": False,
@@ -1482,7 +1482,7 @@ def execute(args):
         record.update(detail)
         run_log.append(record)
 
-    log("start", input=str(input_dir), work=str(work_dir), out=str(out_dir),
+    log("start", input=input_dir.name, work=work_dir.name, out=out_dir.name,
         apply=apply_mode, unknown_args=list(getattr(args, "unknown", [])))
 
     policy, policy_err = load_policy(args.policy)
@@ -1608,8 +1608,8 @@ def execute(args):
     }
     source_mutation = "none" if inputs_unchanged(inventory) else "detected"
     evidence = {
-        "input_root": str(input_dir),
-        "material_roots": [str(r) for r in roots],
+        "input_root": input_dir.name,
+        "material_roots": sorted({r.name for r in roots}),
         "excluded_controls": sorted(Path(x).name for x in exclude_keys),
         "hash_algorithm": policy["hash"]["algorithm"],
         "hash_byte_cap": policy["hash"]["max_hash_bytes"],
@@ -1617,7 +1617,7 @@ def execute(args):
         "total_bytes": total_bytes,
         "input_fingerprint": snapshot_fp,
         "source_mutation": source_mutation,
-        "library_root": str(lib_root),
+        "library_root": policy["apply"]["library_subdir"],
         "policy_sha256": hashlib.sha256(
             json.dumps(policy, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
         "applied": apply_mode,
