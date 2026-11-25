@@ -31,6 +31,7 @@ answers, private data or credentials are included.
 | `examples/demo-case/materials/sidecars/broken.meta.json` |
 | `examples/demo-case/task.md` |
 | `examples/quickstart.md` |
+| `references/gain-ablation.md` |
 | `references/ingest-protocol.md` |
 | `references/safety-and-rollback.md` |
 | `references/version-and-conflict-rules.md` |
