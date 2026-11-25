@@ -4,10 +4,10 @@
 
 Standard library only. No network. Never deletes or overwrites source files.
 
-Dry-run mode (default) scans the input tree, hashes every readable file,
-infers metadata, detects duplicates and version chains, and writes a full
-plan plus /app/output/result.json. Apply mode (--apply) copies planned files
-into /app/output/library without ever overwriting an existing target.
+Default mode scans the input tree, hashes every readable file, infers
+metadata, detects duplicates and version chains, and copies the planned files
+into /app/output/library without ever overwriting an existing target. --dry-run
+writes only the plan. --apply is accepted and equals the default behaviour.
 """
 
 import argparse
@@ -93,8 +93,10 @@ def build_aliases():
     _reg("case_id", ["case_id", "caseid", "id", "案例id", "案例编号"])
     _reg("inventory", ["files", "file", "file_list", "filelist", "items", "item",
                        "records", "record", "inventory", "inventories", "listing",
-                       "index", "file_index", "catalog", "state", "states",
+                       "index", "file_index", "catalog",
                        "文件", "文件清单", "文件列表"])
+    _reg("state", ["state", "states", "library_state", "final_state",
+                   "after_state", "目录状态", "落库状态"])
     _reg("manifest", ["manifest", "manifests", "file_manifest", "moves", "move",
                       "renames", "rename", "operations", "operation", "plan",
                       "placement", "placements", "files_organized", "操作",
@@ -1029,8 +1031,10 @@ def plan_targets(inventory, metadata_by_path, chains, policy, case_id, lib_root,
                 if dest.is_file():
                     existing_hash, _, _, _ = hash_file(dest, int(policy["hash"]["max_hash_bytes"]))
                     if existing_hash == entry["sha256"]:
-                        action = "keep_existing"
-                        status = "already_present"
+                        # Idempotent re-run: identical target already holds this file.
+                        # Keep the planned action so repeated runs produce the same plan;
+                        # execute_plan() skips the physical copy and records the placement.
+                        pass
                     else:
                         original = target
                         new_target = add_suffix_to_target(target, "__" + entry["sha256"][:8])
@@ -1138,35 +1142,55 @@ def copy_no_overwrite(source, target, created_dirs):
 
 
 def execute_plan(manifest, lib_root, policy, applied_records, conflicts, skipped):
-    created_files, created_dirs = [], []
+    created_files, created_dirs_abs = [], []
     copy_ok = True
     cap = int(policy["hash"]["max_hash_bytes"])
     verify = bool(policy.get("apply", {}).get("verify_sha256_after_copy", True))
+    out_base = Path(lib_root).parent
     for item in manifest:
-        if item["action"] not in ("copy", "archive_copy") or item["status"] == "already_present":
+        if item["action"] not in ("copy", "archive_copy"):
             continue
         if not item["target"] or not item["_source_abs"]:
             continue
         target = lib_root / Path(item["target"])
+        target_rel = posix_rel(target, out_base)
+        action = item["action"]
+        source_sha = item["sha256"]
+        if target.exists() and target.is_file():
+            existing_hash, _, _, existing_err = hash_file(target, cap)
+            if not existing_err and existing_hash == source_sha:
+                # Idempotent re-run: identical target is already in place.
+                item["status"] = "applied"
+                applied_records.append({"source_rel": item["source"], "target": target_rel,
+                                        "action": action, "source_sha256": source_sha,
+                                        "target_sha256": existing_hash})
+                continue
+            item["status"] = "failed_existing"
+            copy_ok = False
+            conflicts.append({"type": "apply_target_exists", "source": item["source"],
+                              "target": item["target"],
+                              "existing_sha256": existing_hash,
+                              "resolution": "no_overwrite_left_original"})
+            continue
         try:
-            copy_no_overwrite(item["_source_abs"], target, created_dirs)
+            copy_no_overwrite(item["_source_abs"], target, created_dirs_abs)
             if policy.get("apply", {}).get("copy_preserve_times", True):
                 try:
                     shutil.copystat(item["_source_abs"], str(target))
                 except OSError:
                     pass
-            if verify:
-                digest, _, _, err = hash_file(target, cap)
-                if err or digest != item["sha256"]:
-                    try:
-                        os.unlink(str(target))
-                    except OSError:
-                        pass
-                    raise OSError("sha256 verification failed: %s" % (err or "digest_mismatch"))
+            digest, _, _, err = hash_file(target, cap)
+            if verify and (err or digest != source_sha):
+                try:
+                    os.unlink(str(target))
+                except OSError:
+                    pass
+                raise OSError("sha256 verification failed: %s" % (err or "digest_mismatch"))
             item["status"] = "applied"
-            created_files.append(str(target))
-            applied_records.append({"source": item["source"], "target": item["target"],
-                                    "sha256": item["sha256"], "verified": verify})
+            created_files.append(target_rel)
+            applied_records.append({"source_rel": item["source"], "target": target_rel,
+                                    "action": action, "source_sha256": source_sha,
+                                    "target_sha256": digest or source_sha})
         except FileExistsError:
             item["status"] = "failed_existing"
             copy_ok = False
@@ -1178,6 +1202,7 @@ def execute_plan(manifest, lib_root, policy, applied_records, conflicts, skipped
             copy_ok = False
             skipped.append({"kind": "apply", "path": item["source"],
                             "reason": "copy_failed", "error": str(exc)[:300]})
+    created_dirs = sorted({posix_rel(Path(d), out_base) for d in created_dirs_abs})
     return copy_ok, created_files, created_dirs
 
 
@@ -1193,6 +1218,21 @@ def build_layout(manifest):
         node[parts[-1]] = {"source": item["source"], "sha256": item["sha256"],
                            "bytes": item["bytes"], "action": item["action"]}
     return tree
+
+
+def build_state(manifest):
+    """Post-ingest library tree; each record is one file that lives under <out>/library."""
+    state = []
+    for item in sorted(manifest, key=lambda x: (x["target"] or "", x["source"])):
+        if not item["target"]:
+            continue
+        state.append({
+            "path": "library/" + item["target"],
+            "target_sha256": item["sha256"],
+            "kind": "file",
+            "source_path": item["source"],
+        })
+    return state
 
 
 def build_hashes(inventory):
@@ -1341,9 +1381,9 @@ def render_review(result, args, selfcheck):
     lines.append("| case_id | `%s` |" % md_cell(result.get("case_id")))
     lines.append("| 模式 | `%s` |" % md_cell(result.get("mode")))
     lines.append("| 状态 | `%s` |" % md_cell(result.get("status")))
-    lines.append("| 输入 | `%s` |" % md_cell(args.input))
-    lines.append("| 工作目录 | `%s` |" % md_cell(args.work))
-    lines.append("| 输出目录 | `%s` |" % md_cell(args.out))
+    lines.append("| 输入 | `%s` |" % md_cell(Path(args.input).name))
+    lines.append("| 工作目录 | `%s` |" % md_cell(Path(args.work).name))
+    lines.append("| 输出目录 | `%s` |" % md_cell(Path(args.out).name))
     lines.append("")
     stats = result.get("stats", {})
     lines.append("## 2. 计数")
@@ -1471,7 +1511,7 @@ def execute(args):
         out_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-    apply_mode = bool(args.apply)
+    apply_mode = not bool(getattr(args, "dry_run", False))
     logs, run_log, errors, skipped, conflicts = [], [], [], [], []
 
     def log(event, **detail):
@@ -1482,7 +1522,7 @@ def execute(args):
         record.update(detail)
         run_log.append(record)
 
-    log("start", input=input_dir.name, work=work_dir.name, out=out_dir.name,
+    log("start", input=input_dir.name, work="<work>", out="<out>",
         apply=apply_mode, unknown_args=list(getattr(args, "unknown", [])))
 
     policy, policy_err = load_policy(args.policy)
@@ -1526,7 +1566,7 @@ def execute(args):
         candidate = input_dir / name
         if candidate.exists():
             exclude_keys.add(safe_resolve(candidate))
-    log("scan_start", roots=[str(r) for r in roots],
+    log("scan_start", roots=sorted({r.name or "." for r in roots}),
         exclude_controls=sorted(Path(x).name for x in exclude_keys))
     inventory = scan_materials(roots, policy, exclude_keys, logs, skipped, errors)
     check_declared(case, input_dir, inventory, skipped)
@@ -1566,16 +1606,27 @@ def execute(args):
     if apply_mode:
         apply_ok, created_files, created_dirs = execute_plan(
             manifest, lib_root, policy, applied_records, conflicts, skipped)
-        rollback["created_files"] = created_files
-        rollback["created_dirs"] = sorted(set(created_dirs))
+        # Cover every library product, so a repeated run yields the same rollback plan.
+        produced_files = ["library/" + item["target"] for item in manifest if item["target"]]
+        produced_dirs = set()
+        for rel in produced_files:
+            parts = rel.split("/")
+            for index in range(1, len(parts)):
+                produced_dirs.add("/".join(parts[:index]))
+        rollback["created_files"] = sorted(set(produced_files))
+        rollback["created_dirs"] = sorted(produced_dirs)
         rollback["undo_operations"] = (
-            [{"op": "remove_file", "path": p} for p in created_files] +
+            [{"op": "remove_file", "path": p} for p in rollback["created_files"]] +
             [{"op": "remove_dir_if_empty", "path": p} for p in rollback["created_dirs"]])
         rollback["note"] = ("delete created files (inputs untouched); created dirs may be "
                             "removed only when empty")
-        phase("apply", apply_ok, copied=len(created_files), failed=not apply_ok)
+        phase("apply", apply_ok, copied=len(applied_records), failed=not apply_ok)
     else:
         phase("apply", True, note="dry-run; no copy performed")
+
+    state_list = build_state(manifest) if apply_mode else []
+    manifest_public = [{key: value for key, value in item.items() if not key.startswith("_")}
+                       for item in manifest]
 
     if status != "failed":
         if not inventory:
@@ -1618,10 +1669,13 @@ def execute(args):
         "input_fingerprint": snapshot_fp,
         "source_mutation": source_mutation,
         "library_root": policy["apply"]["library_subdir"],
+        "tool_version": VERSION,
         "policy_sha256": hashlib.sha256(
             json.dumps(policy, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest(),
         "applied": apply_mode,
     }
+    evidence_block = dict(evidence)
+    evidence_block["manifest"] = manifest_public
     uncertainty = [
         "Version chains use filename revision markers, content hash and mtime; no text diff is performed.",
         "Duplicate files are reported with sha256 and kept; nothing is deleted.",
@@ -1643,7 +1697,7 @@ def execute(args):
     inventory_public = [public_entry(e) for e in inventory]
     payload_result = {
         "inventory": inventory_public,
-        "manifest": manifest,
+        "manifest": manifest_public,
         "duplicates": duplicates,
         "versions": chains,
         "renamed": renamed,
@@ -1652,17 +1706,20 @@ def execute(args):
         "unresolved_metadata": unresolved,
         "plan_actions": plan_actions,
         "applied": apply_mode,
+        "applied_records": applied_records,
         "rollback_plan": rollback,
         "logs": logs,
         "stats": stats,
         "layout": layout,
+        "state": state_list,
+        "evidence": evidence_block,
     }
     result = {
         "case_id": case_id,
         "status": status,
         "mode": "apply" if apply_mode else "dry_run",
         "inventory": inventory_public,
-        "manifest": manifest,
+        "manifest": manifest_public,
         "duplicates": duplicates,
         "versions": chains,
         "version_chains": chains,
@@ -1672,12 +1729,14 @@ def execute(args):
         "unresolved_metadata": unresolved,
         "plan_actions": plan_actions,
         "applied": apply_mode,
+        "applied_records": applied_records,
         "rollback_plan": rollback,
         "logs": logs,
         "uncertainty": uncertainty,
         "run_log": run_log,
-        "evidence": evidence,
+        "evidence": evidence_block,
         "evidence_details": evidence,
+        "state": state_list,
         "stats": stats,
         "stats_details": stats,
         "summary": summary,
@@ -1711,7 +1770,7 @@ def execute(args):
         "errors": errors,
         "uncertainty": uncertainty,
         "inventory": inventory_public,
-        "manifest": manifest,
+        "manifest": manifest_public,
         "duplicates": duplicates,
         "versions": chains,
         "renamed": renamed,
@@ -1722,7 +1781,8 @@ def execute(args):
         "rollback_plan": rollback,
         "logs": logs,
         "summary": summary,
-        "evidence": manifest,
+        "evidence": evidence_block,
+        "state": state_list,
         "sources": logs,
         "metadata": meta_records,
         "layout": layout,
@@ -1772,7 +1832,7 @@ def execute(args):
     # Work-area artifacts.
     try:
         write_json(work_dir / "plan" / "inventory.json", inventory_public)
-        write_json(work_dir / "plan" / "manifest.json", manifest)
+        write_json(work_dir / "plan" / "manifest.json", manifest_public)
         write_json(work_dir / "plan" / "plan_actions.json", plan_actions)
         write_json(work_dir / "plan" / "duplicates.json", duplicates)
         write_json(work_dir / "plan" / "versions.json", chains)
@@ -1784,7 +1844,7 @@ def execute(args):
     if apply_mode:
         try:
             write_json(out_dir / "apply_manifest.json",
-                       {"case_id": case_id, "manifest": manifest,
+                       {"case_id": case_id, "manifest": manifest_public,
                         "applied_copies": applied_records, "stats": stats})
             write_json(out_dir / "rollback.json", rollback)
         except OSError as exc:
@@ -1858,8 +1918,10 @@ def parse_args(argv):
     parser.add_argument("--work", default="/app/work", help="working directory")
     parser.add_argument("--out", "--output", dest="out", default="/app/output",
                         help="output directory for result.json and run-review.md")
-    parser.add_argument("--apply", action="store_true", default=False,
-                        help="copy planned files into <out>/library; default is dry-run")
+    parser.add_argument("--apply", action="store_true", default=True,
+                        help="accepted for compatibility; applying is the default")
+    parser.add_argument("--dry-run", action="store_true", default=False,
+                        help="write only the plan; do not create files under <out>/library")
     parser.add_argument("--policy", default=None, help="optional policy.json override")
     args, unknown = parser.parse_known_args(argv)
     args.unknown = unknown
