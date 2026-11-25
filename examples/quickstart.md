@@ -45,14 +45,14 @@ python scripts/run_skill.py \
 python -m json.tool /tmp/sk-demo/out/result.json | head -80
 ```
 
-确认 `selfcheck` 无 `FAIL` 后执行：
+上面的命令默认会复制落库。只想看计划、不写 `out/library` 时加 `--dry-run`：
 
 ```bash
 python scripts/run_skill.py \
   --input examples/demo-case \
   --work /tmp/sk-demo/work \
   --out /tmp/sk-demo/out \
-  --apply
+  --dry-run
 ```
 
 ## 3. 预期结果
@@ -68,7 +68,7 @@ python scripts/run_skill.py \
 | 跳过 | 3–4 条：声明缺失、非法 sidecar、孤儿 sidecar；空目录占位若在打包后仍存在则多 1 条 |
 | 状态 | `partial`（因跳过/冲突/元数据缺失），这是诚实的部分成功 |
 | 输入 | 运行前后完全不变 |
-| 库文件 | `--apply` 后 11 个，全部位于 `out/library/NeuroAttention/...` |
+| 库文件 | 默认运行后 11 个，全部位于 `out/library/NeuroAttention/...` |
 
 落库后的目录示例：
 
@@ -99,5 +99,7 @@ out/library/NeuroAttention/
 - `contract_fields` 里的 10 个字段都出现在结果顶层；
 - `selfcheck` 全部 `ok=true`；
 - `out/library` 中每个文件 hash 与 `manifest` 一致；
+- `state[].path` 全部以 `library/` 开头，且 `evidence.input_fingerprint` 非空；
+- 重复运行 `out/result.json` 字节一致、`out/library` 文件数不增长；
 - `examples/demo-case` 下文件 hash 未变化；
 - `run-review.md` 中的“Agent 复核备注”已由执行 Agent 补全。
