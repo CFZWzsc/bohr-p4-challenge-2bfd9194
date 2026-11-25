@@ -1,6 +1,6 @@
 ---
 name: research-library-ingest-steward
-description: Use when a research-library case supplies case.json plus scattered materials and needs deterministic inventory, sha256 hashes, metadata inference, duplicate and version detection, conflict-safe target planning, dry-run then apply into /app/output/library, and /app/output/result.json plus run-review.md. Triggers include 科研资料入库, 文件整理, 入库清单, 重复文件, 版本链, manifest, dry-run.
+description: Use when a research-library case supplies case.json plus scattered materials and needs deterministic inventory, sha256 hashes, metadata inference, duplicate and version detection, conflict-safe target planning, default copy into /app/output/library (--dry-run for a plan only), and /app/output/result.json plus run-review.md. Triggers include 科研资料入库, 文件整理, 入库清单, 重复文件, 版本链, manifest, dry-run.
 ---
 
 # 科研资料入库 / Research Library Ingest Steward
@@ -12,8 +12,8 @@ description: Use when a research-library case supplies case.json plus scattered 
 - 逐文件计算 `sha256`，给出清单（inventory）与字节数；
 - 从 `case.json`、sidecar、文件名和文本首段推断元数据，缺失就留空；
 - 检测**完全重复**（同 hash）与**版本链**（同标题干 + 修订标记）；
-- 生成 `source -> target` 的入库清单、冲突处理方案与 dry-run 计划；
-- 在明确允许时执行 `--apply`，把文件**复制**到 `/app/output/library`，复制后复核 hash；
+- 生成 `source -> target` 的入库清单、冲突处理方案；
+- 默认把文件**复制**到 `/app/output/library`，复制后复核 hash；`--dry-run` 只输出计划；
 - 输出 `/app/output/result.json`（契约字段齐全）与 `/app/output/run-review.md`（人工复核）。
 
 ## 2. 适用条件
@@ -23,7 +23,7 @@ description: Use when a research-library case supplies case.json plus scattered 
 - 输入是一个目录，通常包含 `case.json` 与 `materials/`（或 `case.json` 中用 `materials`、`data_dir`、`input_dir` 等键指定资料根目录）；
 - 需要按项目/类别/文件名建立目录结构，或至少需要一份带 hash 的入库清单；
 - 需要区分“重复文件”和“同一文献的多个版本”；
-- 需要 dry-run 先行、apply 可验证、失败可回滚；
+- 需要可预览、可验证、失败可回滚的落库；
 - 允许只读输入，输出写在 `/app/output` 与 `/app/work`。
 
 ## 3. 不适用场景
@@ -73,15 +73,17 @@ python /skills/weekly-skill/scripts/run_skill.py \
   --out /app/output
 ```
 
-以上是 **dry-run**（默认，不复制、不修改输入）。自检通过后执行：
+以上命令**默认执行落库**（复制到 `library/`，不修改输入）。只看计划时加 `--dry-run`：
 
 ```bash
 python /skills/weekly-skill/scripts/run_skill.py \
   --input /input \
   --work /app/work \
   --out /app/output \
-  --apply
+  --dry-run
 ```
+
+`--apply` 仍可传入，等价于默认行为。
 
 参数：
 
@@ -90,14 +92,15 @@ python /skills/weekly-skill/scripts/run_skill.py \
 | `--input` | `/input` | 输入目录 |
 | `--work` | `/app/work` | 计划、日志等中间产物 |
 | `--out` | `/app/output` | `result.json`、`run-review.md`、`library/` |
-| `--apply` | 关闭 | 不传即 dry-run |
+| `--dry-run` | 关闭 | 只输出计划，不创建 `library/` |
+| `--apply` | 开启 | 兼容参数；不传也已执行落库 |
 | `--policy` | 内置 `assets/policy.json` | 可选策略覆盖 |
 
 在仓库内可直接用示例验证：
 
 ```bash
 python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /tmp/out
-python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /tmp/out --apply
+python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /tmp/out --dry-run
 ```
 
 ## 6. 输出字段
@@ -108,7 +111,7 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 |-|-|
 | `case_id` | 案例编号；缺失时为 `unknown` |
 | `status` | `success` / `partial` / `failed` / `insufficient_input` |
-| `mode` | `dry_run` 或 `apply` |
+| `mode` | `apply`（默认）或 `dry_run` |
 | `inventory` | 每个文件的路径、字节、sha256、mtime、类别、是否可读 |
 | `manifest` | `source -> target`，含 sha256、action、status、版本链 |
 | `duplicates` | 同 sha256 的重复组，`keep_all_no_delete` |
@@ -118,7 +121,9 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 | `conflicts` | 同名目标、已有不同内容、同 stem 歧义及解决方式 |
 | `unresolved_metadata` | 缺失的必填元数据字段，不猜测 |
 | `plan_actions` | 逐条复制/归档/保留动作，`overwrite=false` |
-| `applied` | 是否执行了 `--apply` |
+| `applied` | 本次是否执行了落库（默认 `true`） |
+| `applied_records` | 每条落库记录：`source_rel`、`target`、`action`、`source_sha256`、`target_sha256` |
+| `state` | 落库后目录树：`path`（以 `library/` 开头）、`target_sha256`、`kind`、`source_path` |
 | `rollback_plan` | 已创建文件/目录与撤销操作；输入永远只读 |
 | `logs` / `run_log` | 事件序列与阶段计数（不含 wall-clock，保证可复现） |
 | `uncertainty` | 版本推断、截断 hash、跳过等限制说明 |
@@ -127,13 +132,14 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 
 契约字段自动映射（大小写与下划线不敏感）：
 
-- `files` / `items` / `records` / `state` -> `inventory`
+- `files` / `items` / `records` -> `inventory`
+- `state` / `states` -> 落库后目录树（`library/` 前缀）
 - `moves` / `renames` / `operations` / `manifest` -> `manifest`
 - `dupes` / `duplicates` -> `duplicates`
 - `versions` / `revision_chain` -> `versions`
 - `conflicts` -> `conflicts`；`skips` / `skipped` -> `skipped`
 - `report` / `summary` -> 一段短字符串
-- `evidence` -> `manifest`；`sources` -> `logs`
+- `evidence` -> 证据块（`manifest` + `input_fingerprint`/`policy_sha256`/`tool_version`/`source_mutation`）；`sources` -> `logs`
 - 未知字段先做同义/子串启发式，仍无法映射则保留 `null` 并记入 `contract_extras`
 
 ## 7. 入库规则
@@ -185,9 +191,9 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 
 ## 8. 安全约束
 
-1. **永不删除输入**：只读扫描；`--apply` 只创建 `/app/output/library` 下的新文件。
+1. **永不删除输入**：只读扫描；默认只创建 `/app/output/library` 下的新文件。
 2. **永不静默覆盖**：目标存在一律走 `keep_existing` 或加后缀；`overwrite` 固定 `false`。
-3. **dry-run 先行**：默认不写库，只写计划与结果；确认后才加 `--apply`。
+3. **默认落库、可预览**：不带参数即复制落库；`--dry-run` 只写计划与结果，不创建库文件。
 4. **不跟随符号链接**：遇到 symlink 记 `skipped`，不读取链接目标。
 5. **有上限**：默认最多 5000 个文件、深度 32、单文件 hash 64 MiB，超出均记录，不崩溃。
 6. **不联网**：不使用 requests、curl、外部 API；仅标准库。
@@ -199,7 +205,7 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 - `logs`：编号事件（`scan_start`、`plan`、`apply`、`selfcheck` 等），只有计数与路径，无 wall-clock；
 - `run_log`：阶段级 `ok/count`，便于判断在哪一步失败；
 - `work/plan/*.json`：`inventory`、`manifest`、`plan_actions`、`duplicates`、`versions`、`logs`、`rollback_plan`；
-- `apply` 时额外写 `out/apply_manifest.json` 与 `out/rollback.json`；
+- 落库时额外写 `out/apply_manifest.json` 与 `out/rollback.json`；
 - 回滚方式：按 `rollback_plan.undo_operations` 删除**本次创建**的文件，再按需删除空目录；输入文件从未改动。
 
 ## 10. 异常处理
@@ -232,21 +238,21 @@ python scripts/run_skill.py --input examples/demo-case --work /tmp/work --out /t
 - [ ] `skipped`、`conflicts`、`unresolved_metadata` 均有原因；
 - [ ] `selfcheck` 无 `FAIL`；
 - [ ] 运行前后输入文件的 size/mtime/sha256 未变化；
-- [ ] `--apply` 时 `out/library` 中每个文件的 hash 与 `manifest` 一致；
+- [ ] 默认运行后 `out/library` 中每个文件的 hash 与 `manifest` 一致；
 - [ ] `run-review.md` 已按第 12 节写完。
 
 ## 12. 执行 Agent 必做步骤
 
-1. **先 dry-run**（第 5 节第一条命令）。
+1. **默认运行落库**（第 5 节第一条命令）；需要只读预览时加 `--dry-run`。
 2. 读取 `/app/output/result.json`：
    - `status`、`stats`、`selfcheck`、`skipped`、`conflicts`、`unresolved_metadata`、`plan_actions`；
-   - 若 `selfcheck` 有 `FAIL`，停止 apply，在复核报告中说明失败项。
+   - 若 `selfcheck` 有 `FAIL`，停止后续操作，在复核报告中说明失败项。
 3. **独立核对 manifest 与文件系统**：
    - 遍历 `/input` 的资料根目录，统计普通文件数（排除 `case.json`、`task.md`）；
    - 与 `len(inventory) + 未进入 inventory 的 skipped 文件数` 比较；
    - 抽查至少 3 个文件（含中文名）用 `sha256sum` 或 Python `hashlib` 复算，与 `manifest` 对比。
-4. 若 dry-run 自检通过（允许 `partial` 来自已解释的 skipped/unresolved；冲突均为命名冲突），执行第 5 节 `--apply` 命令。
-5. apply 后再次核对：
+4. 若自检通过（允许 `partial` 来自已解释的 skipped/unresolved；冲突均为命名冲突），核对落库结果。
+5. 落库后核对：
    - `/app/output/library` 的文件数等于 `manifest` 中 `target` 非空条数；
    - 库内文件 hash 与 `manifest` 一致；
    - `/input` 下文件 hash 未变化。
